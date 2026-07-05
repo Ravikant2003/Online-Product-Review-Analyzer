@@ -2,6 +2,9 @@ import streamlit as st
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
 import pandas as pd
+import csv
+import io
+from text_sources import read_texts_from_csv
 
 # Define your label mapping (must match what you used during training)
 LABEL_MAP = {
@@ -11,7 +14,6 @@ LABEL_MAP = {
 }
 
 # Load model and tokenizer with label mapping
-@st.cache_resource
 @st.cache_resource
 def load_model():
     model = AutoModelForSequenceClassification.from_pretrained("./sentiment_model")
@@ -31,14 +33,25 @@ def load_model():
     )
 
 # Function to format sentiment prediction
+def get_top_prediction(prediction):
+    return max(prediction, key=lambda item: item["score"])
+
+
 def format_prediction(prediction):
-    # Get the top prediction
-    top_pred = prediction[0]
-    sentiment = top_pred['label']
+    top_pred = get_top_prediction(prediction)
+    sentiment = LABEL_MAP.get(top_pred['label'], top_pred['label'])
     score = top_pred['score']
     
     emoji = "😠" if sentiment == "negative" else "😐" if sentiment == "neutral" else "😊"
     return f"{emoji} {sentiment.capitalize()} ({score:.2%} confidence)"
+
+
+def render_batch_results_csv(rows):
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["review", "sentiment", "confidence"])
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
 
 # Static performance data
 performance_data = {
@@ -63,6 +76,10 @@ st.set_page_config(page_title="Sentiment Analyzer", page_icon="😊", layout="wi
 # Sidebar for input
 st.sidebar.header("Sentiment Analysis Demo")
 user_input = st.sidebar.text_area("Enter your text here:", "The product was amazing! Loved the quality and fast delivery.")
+uploaded_reviews_csv = st.sidebar.file_uploader(
+    "Upload a CSV with Tweet Text, review, text, or comment data",
+    type=["csv"],
+)
 analyze_button = st.sidebar.button("Analyze Sentiment")
 
 # Load model (only once)
@@ -104,6 +121,36 @@ with col1:
             st.bar_chart(conf_df.set_index("Sentiment"))
     else:
         st.info(" Enter text and click 'Analyze Sentiment' to get started")
+
+    if uploaded_reviews_csv is not None:
+        st.subheader("Batch CSV Analysis")
+        try:
+            source_column, review_texts = read_texts_from_csv(uploaded_reviews_csv.getvalue())
+        except ValueError as error:
+            st.error(str(error))
+        else:
+            batch_rows = []
+            with st.spinner("Analyzing CSV rows..."):
+                for review in review_texts:
+                    result = classifier(review)[0]
+                    top_prediction = get_top_prediction(result)
+                    sentiment = LABEL_MAP.get(top_prediction["label"], top_prediction["label"])
+                    batch_rows.append(
+                        {
+                            "review": review,
+                            "sentiment": sentiment,
+                            "confidence": f"{top_prediction['score']:.2%}",
+                        }
+                    )
+
+            st.caption(f"Analyzed {len(batch_rows)} rows from the {source_column} column.")
+            st.dataframe(batch_rows, use_container_width=True)
+            st.download_button(
+                "Download CSV Results",
+                data=render_batch_results_csv(batch_rows),
+                file_name="sentiment_results.csv",
+                mime="text/csv",
+            )
 
 # Performance metrics column
 with col2:
